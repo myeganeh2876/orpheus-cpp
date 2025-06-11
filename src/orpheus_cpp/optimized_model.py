@@ -51,7 +51,7 @@ CUSTOM_TOKEN_PREFIX = "<custom_token_"
 
 
 class OptimizedOrpheusCpp:
-    """Optimized version for dual RTX 6000 Ada setup with maximum GPU utilization."""
+    """Fixed optimized version with proper error handling and fallbacks."""
     
     lang_to_model = {
         "en": "isaiahbjork/orpheus-3b-0.1-ft-Q4_K_M-GGUF",
@@ -86,10 +86,20 @@ class OptimizedOrpheusCpp:
 
         # Auto-detect optimal thread count if not specified
         if n_threads == 0:
-            n_threads = min(mp.cpu_count(), 32)  # Cap at 32 for optimal performance
+            n_threads = min(mp.cpu_count(), 16)  # Reduced cap for stability
             
-        # Set up GPU split for dual RTX 6000 Ada (48GB each)
-        if gpu_split is None:
+        # Detect available providers first
+        available_providers = onnxruntime.get_available_providers()
+        self.has_cuda = "CUDAExecutionProvider" in available_providers
+        
+        if not self.has_cuda:
+            print("⚠️  CUDA provider not available. Available providers:", available_providers)
+            print("⚠️  Falling back to CPU execution")
+            n_gpu_layers = 0  # Force CPU execution
+            gpu_split = None
+            
+        # Set up GPU split for dual RTX 6000 Ada (48GB each) - only if CUDA available
+        if gpu_split is None and self.has_cuda:
             gpu_split = [0.5, 0.5]  # Equal split between two GPUs
             
         repo_id = self.lang_to_model[lang]
@@ -101,71 +111,115 @@ class OptimizedOrpheusCpp:
         from llama_cpp import Llama
 
         print(f"Initializing with {n_gpu_layers} GPU layers, {n_threads} threads")
-        print(f"GPU split: {gpu_split}")
+        if gpu_split and self.has_cuda:
+            print(f"GPU split: {gpu_split}")
         print(f"Batch size: {batch_size}")
 
-        # Optimized Llama configuration for dual RTX 6000 Ada
-        self._llm = Llama(
-            model_path=model_file,
-            n_ctx=4096,  # Increased context window
-            verbose=verbose,
-            n_gpu_layers=n_gpu_layers,
-            n_threads=n_threads,
-            n_threads_batch=n_threads,  # Batch processing threads
-            batch_size=batch_size,
-            use_mmap=use_mmap,
-            use_mlock=use_mlock,
-            tensor_split=gpu_split,  # Split model across GPUs
-            main_gpu=0,  # Primary GPU
-            flash_attn=True,  # Enable flash attention if available
-        )
+        # Fixed Llama configuration with proper context size
+        llama_kwargs = {
+            "model_path": model_file,
+            "n_ctx": 131072,  # Match training context size to avoid warnings
+            "verbose": verbose,
+            "n_gpu_layers": n_gpu_layers,
+            "n_threads": n_threads,
+            "n_threads_batch": n_threads,
+            "batch_size": batch_size,
+            "use_mmap": use_mmap,
+            "use_mlock": use_mlock,
+        }
+        
+        # Only add GPU-specific parameters if CUDA is available
+        if self.has_cuda and gpu_split:
+            llama_kwargs.update({
+                "tensor_split": gpu_split,
+                "main_gpu": 0,
+            })
+            
+        # Try to enable flash attention if available
+        try:
+            llama_kwargs["flash_attn"] = True
+        except:
+            pass  # Flash attention not available
+            
+        self._llm = Llama(**llama_kwargs)
 
-        # Initialize multiple SNAC sessions for parallel processing
+        # Initialize SNAC sessions with proper error handling
         repo_id = "onnx-community/snac_24khz-ONNX"
         snac_model_file = "decoder_model.onnx"
         snac_model_path = hf_hub_download(
             repo_id, subfolder="onnx", filename=snac_model_file
         )
 
-        # Create multiple ONNX sessions for parallel audio generation
+        # Create ONNX sessions with fallback providers
         self._snac_sessions = []
         self._session_lock = threading.Lock()
         
-        # CUDA provider options for maximum performance
-        cuda_provider_options = {
-            'device_id': 0,
-            'arena_extend_strategy': 'kSameAsRequested',
-            'gpu_mem_limit': 24 * 1024 * 1024 * 1024,  # 24GB per session
-            'cudnn_conv_algo_search': 'EXHAUSTIVE',
-            'do_copy_in_default_stream': True,
-        }
+        # Determine providers to use
+        if self.has_cuda:
+            providers = [
+                ('CUDAExecutionProvider', {
+                    'device_id': 0,
+                    'arena_extend_strategy': 'kSameAsRequested',
+                    'gpu_mem_limit': 12 * 1024 * 1024 * 1024,  # 12GB per session (conservative)
+                    'cudnn_conv_algo_search': 'EXHAUSTIVE',
+                    'do_copy_in_default_stream': True,
+                }),
+                'CPUExecutionProvider'
+            ]
+        else:
+            providers = ['CPUExecutionProvider']
         
+        # Reduce parallel sessions if no CUDA
+        if not self.has_cuda:
+            n_parallel = min(n_parallel, 2)  # Limit CPU sessions
+            
         for i in range(n_parallel):
             session_options = onnxruntime.SessionOptions()
             session_options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
             session_options.execution_mode = onnxruntime.ExecutionMode.ORT_PARALLEL
-            session_options.inter_op_num_threads = 4
-            session_options.intra_op_num_threads = 8
+            session_options.inter_op_num_threads = 2
+            session_options.intra_op_num_threads = 4
             
-            # Alternate between GPUs for load balancing
-            gpu_id = i % 2
-            cuda_options = cuda_provider_options.copy()
-            cuda_options['device_id'] = gpu_id
+            # Alternate between GPUs for load balancing (if CUDA available)
+            if self.has_cuda and len(available_providers) > 1:
+                gpu_id = i % 2
+                cuda_options = providers[0][1].copy()
+                cuda_options['device_id'] = gpu_id
+                session_providers = [('CUDAExecutionProvider', cuda_options), 'CPUExecutionProvider']
+            else:
+                session_providers = providers
             
-            session = onnxruntime.InferenceSession(
-                snac_model_path,
-                providers=[
-                    ('CUDAExecutionProvider', cuda_options),
-                    'CPUExecutionProvider'
-                ],
-                sess_options=session_options
-            )
-            self._snac_sessions.append(session)
+            try:
+                session = onnxruntime.InferenceSession(
+                    snac_model_path,
+                    providers=session_providers,
+                    sess_options=session_options
+                )
+                self._snac_sessions.append(session)
+            except Exception as e:
+                print(f"Warning: Failed to create ONNX session {i}: {e}")
+                # Try with CPU only
+                try:
+                    session = onnxruntime.InferenceSession(
+                        snac_model_path,
+                        providers=['CPUExecutionProvider'],
+                        sess_options=session_options
+                    )
+                    self._snac_sessions.append(session)
+                except Exception as e2:
+                    print(f"Error: Failed to create CPU session {i}: {e2}")
+                    
+        if not self._snac_sessions:
+            raise RuntimeError("Failed to create any ONNX sessions")
             
         self._current_session_idx = 0
-        self._executor = ThreadPoolExecutor(max_workers=n_parallel * 2)
+        self._executor = ThreadPoolExecutor(max_workers=len(self._snac_sessions))
         
-        print(f"Initialized {len(self._snac_sessions)} SNAC sessions across {2} GPUs")
+        print(f"Initialized {len(self._snac_sessions)} SNAC sessions")
+        if self.has_cuda:
+            print("Using CUDA acceleration")
+        else:
+            print("Using CPU execution")
         
         # Pre-warm the models
         self._warmup()
@@ -178,12 +232,15 @@ class OptimizedOrpheusCpp:
             # Warmup language model
             warmup_tokens = list(self._token_gen(warmup_text, TTSOptions(max_tokens=50)))
             
-            # Warmup SNAC sessions
-            dummy_codes = [np.ones((1, 4), dtype=np.int32) for _ in range(3)]
+            # Warmup SNAC sessions with correct data types
+            dummy_codes = [np.ones((1, 4), dtype=np.int64) for _ in range(3)]  # Fixed: use int64
             for session in self._snac_sessions:
-                input_names = [x.name for x in session.get_inputs()]
-                input_dict = dict(zip(input_names, dummy_codes))
-                session.run(None, input_dict)
+                try:
+                    input_names = [x.name for x in session.get_inputs()]
+                    input_dict = dict(zip(input_names, dummy_codes))
+                    session.run(None, input_dict)
+                except Exception as e:
+                    print(f"Warmup warning: {e}")
                 
             print("Warmup completed successfully")
         except Exception as e:
@@ -251,7 +308,7 @@ class OptimizedOrpheusCpp:
         # Process remaining futures
         for future in futures:
             try:
-                audio_samples = future.result(timeout=5.0)
+                audio_samples = future.result(timeout=10.0)  # Increased timeout
                 if audio_samples is not None:
                     yield audio_samples
             except Exception as e:
@@ -265,8 +322,8 @@ class OptimizedOrpheusCpp:
         num_frames = len(multiframe) // 7
         frame = multiframe[: num_frames * 7]
 
-        # Use CuPy for GPU-accelerated array operations if available
-        if CUPY_AVAILABLE:
+        # Use CuPy for GPU-accelerated array operations if available and CUDA is working
+        if CUPY_AVAILABLE and self.has_cuda:
             try:
                 return self._convert_to_audio_gpu(frame, num_frames)
             except Exception as e:
@@ -277,9 +334,9 @@ class OptimizedOrpheusCpp:
     def _convert_to_audio_gpu(self, frame: list[int], num_frames: int) -> np.ndarray | None:
         """GPU-accelerated audio conversion using CuPy."""
         # Initialize GPU arrays
-        codes_0 = cp.array([], dtype=cp.int32)
-        codes_1 = cp.array([], dtype=cp.int32)
-        codes_2 = cp.array([], dtype=cp.int32)
+        codes_0 = cp.array([], dtype=cp.int64)  # Fixed: use int64
+        codes_1 = cp.array([], dtype=cp.int64)
+        codes_2 = cp.array([], dtype=cp.int64)
 
         for j in range(num_frames):
             i = 7 * j
@@ -307,9 +364,9 @@ class OptimizedOrpheusCpp:
 
     def _convert_to_audio_cpu(self, frame: list[int], num_frames: int) -> np.ndarray | None:
         """CPU-based audio conversion (fallback)."""
-        codes_0 = np.array([], dtype=np.int32)
-        codes_1 = np.array([], dtype=np.int32)
-        codes_2 = np.array([], dtype=np.int32)
+        codes_0 = np.array([], dtype=np.int64)  # Fixed: use int64
+        codes_1 = np.array([], dtype=np.int64)
+        codes_2 = np.array([], dtype=np.int64)
 
         for j in range(num_frames):
             i = 7 * j
@@ -354,6 +411,8 @@ class OptimizedOrpheusCpp:
         buffer = []
         for _, array in self.stream_tts_sync(text, options):
             buffer.append(array)
+        if not buffer:
+            return (24_000, np.array([], dtype=np.int16).reshape(1, 0))
         return (24_000, np.concatenate(buffer, axis=1))
 
     async def stream_tts(
@@ -395,19 +454,23 @@ class OptimizedOrpheusCpp:
         voice_id = options.get("voice_id", "tara")
         text = f"<|audio|>{voice_id}: {text}<|eot_id|><custom_token_4>"
         
-        token_gen = self._llm(
-            text,
-            max_tokens=options.get("max_tokens", 2_048),
-            stream=True,
-            temperature=options.get("temperature", 0.8),
-            top_p=options.get("top_p", 0.95),
-            top_k=options.get("top_k", 40),
-            min_p=options.get("min_p", 0.05),
-            repeat_penalty=1.1,  # Prevent repetition
-        )
-        
-        for token in cast(Iterator[CreateCompletionStreamResponse], token_gen):
-            yield token["choices"][0]["text"]
+        try:
+            token_gen = self._llm(
+                text,
+                max_tokens=options.get("max_tokens", 2_048),
+                stream=True,
+                temperature=options.get("temperature", 0.8),
+                top_p=options.get("top_p", 0.95),
+                top_k=options.get("top_k", 40),
+                min_p=options.get("min_p", 0.05),
+                repeat_penalty=1.1,  # Prevent repetition
+            )
+            
+            for token in cast(Iterator[CreateCompletionStreamResponse], token_gen):
+                yield token["choices"][0]["text"]
+        except Exception as e:
+            print(f"Token generation error: {e}")
+            return
 
     def stream_tts_sync(
         self, text: str, options: TTSOptions | None = None
@@ -435,12 +498,13 @@ class OptimizedOrpheusCpp:
         self, texts: list[str], options: TTSOptions | None = None
     ) -> list[tuple[int, NDArray[np.int16]]]:
         """Batch processing for multiple texts with parallel execution."""
-        with ThreadPoolExecutor(max_workers=len(self._snac_sessions)) as executor:
+        max_workers = min(len(self._snac_sessions), len(texts))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(self.tts, text, options) for text in texts]
             results = []
             for future in futures:
                 try:
-                    results.append(future.result(timeout=60))
+                    results.append(future.result(timeout=120))  # Increased timeout
                 except Exception as e:
                     print(f"Batch TTS error: {e}")
                     results.append((24_000, np.array([], dtype=np.int16).reshape(1, 0)))
