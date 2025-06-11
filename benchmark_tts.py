@@ -585,7 +585,8 @@ class TTSBenchmark:
         print(f"🎯 TTS BENCHMARK SUMMARY")
         print(f"="*80)
         
-        if 'error' not in self.results['original']:
+        # Handle original version results
+        if self.results['original'] and 'error' not in self.results['original']:
             orig = self.results['original']
             print(f"\n📊 ORIGINAL VERSION:")
             print(f"  Total time: {orig['total_time']:.2f}s")
@@ -598,8 +599,14 @@ class TTSBenchmark:
                 gpu_stats = orig['system_stats']['gpu']
                 print(f"  GPU utilization: {gpu_stats['avg_load']:.1f}% avg, {gpu_stats['max_load']:.1f}% max")
                 print(f"  GPU memory: {gpu_stats['avg_memory']:.1f}% avg, {gpu_stats['max_memory']:.1f}% max")
+        elif self.results['original'] and 'error' in self.results['original']:
+            print(f"\n📊 ORIGINAL VERSION:")
+            print(f"  ❌ Benchmark failed: {self.results['original']['error']}")
+        else:
+            print(f"\n📊 ORIGINAL VERSION: Not tested")
         
-        if 'error' not in self.results['optimized']:
+        # Handle optimized version results
+        if self.results['optimized'] and 'error' not in self.results['optimized']:
             opt = self.results['optimized']
             print(f"\n🚀 OPTIMIZED VERSION:")
             print(f"  Total time: {opt['total_time']:.2f}s")
@@ -612,14 +619,24 @@ class TTSBenchmark:
                 gpu_stats = opt['system_stats']['gpu']
                 print(f"  GPU utilization: {gpu_stats['avg_load']:.1f}% avg, {gpu_stats['max_load']:.1f}% max")
                 print(f"  GPU memory: {gpu_stats['avg_memory']:.1f}% avg, {gpu_stats['max_memory']:.1f}% max")
+        elif self.results['optimized'] and 'error' in self.results['optimized']:
+            print(f"\n🚀 OPTIMIZED VERSION:")
+            print(f"  ❌ Benchmark failed: {self.results['optimized']['error']}")
+        else:
+            print(f"\n🚀 OPTIMIZED VERSION: Not tested")
         
-        if 'improvements' in self.results:
+        # Handle improvements calculation
+        if ('improvements' in self.results and 
+            self.results['original'] and 'error' not in self.results['original'] and
+            self.results['optimized'] and 'error' not in self.results['optimized']):
             imp = self.results['improvements']
             print(f"\n📈 PERFORMANCE GAINS:")
             print(f"  Speed improvement: {imp['speed_improvement']:.2f}x")
             print(f"  Throughput improvement: {imp['throughput_improvement']:.2f}x")
             print(f"  Time reduction: {imp['total_time_reduction']:.1f}%")
             print(f"  Real-time factor improvement: {imp['real_time_factor_improvement']:.2f}x")
+        else:
+            print(f"\n📈 PERFORMANCE GAINS: Cannot calculate (one or both benchmarks failed)")
         
         print(f"\n" + "="*80)
 

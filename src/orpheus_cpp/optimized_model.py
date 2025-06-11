@@ -404,9 +404,6 @@ class OptimizedOrpheusCpp:
             top_k=options.get("top_k", 40),
             min_p=options.get("min_p", 0.05),
             repeat_penalty=1.1,  # Prevent repetition
-            mirostat=2,  # Better quality control
-            mirostat_tau=5.0,
-            mirostat_eta=0.1,
         )
         
         for token in cast(Iterator[CreateCompletionStreamResponse], token_gen):
