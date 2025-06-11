@@ -1,0 +1,16 @@
+# Core dependencies
+numpy>=2.0
+huggingface-hub
+onnxruntime-gpu>=1.16.0
+transformers
+psutil
+GPUtil
+
+# GPU acceleration
+cupy-cuda12x
+
+# For CUDA-optimized llama-cpp-python, install separately with:
+# pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+
+# Optional for enhanced performance monitoring
+nvidia-ml-py3

@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "orpheus-cpp"
+dynamic = ["version"]
+description = ''
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+keywords = []
+authors = [
+  { name = "Freddy Boulton", email = "freddyboulton@notmyemail.com" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+]
+dependencies = ["huggingface-hub","onnxruntime", "transformers", "numpy>=2.0"]
+
+[project.urls]
+Documentation = "https://github.com/freddyaboulton/orpheus-cpp#readme"
+Issues = "https://github.com/freddyaboulton/orpheus-cpp/issues"
+Source = "https://github.com/freddyaboulton/orpheus-cpp"
+
+[tool.hatch.version]
+path = "src/orpheus_cpp/__about__.py"
+
+[tool.hatch.envs.types]
+extra-dependencies = [
+  "mypy>=1.0.0",
+]
+[tool.hatch.envs.types.scripts]
+check = "mypy --install-types --non-interactive {args:src/orpheus_cpp tests}"
+
+[tool.coverage.run]
+source_pkgs = ["orpheus_cpp", "tests"]
+branch = true
+parallel = true
+omit = [
+  "src/orpheus_cpp/__about__.py",
+]
+
+[tool.coverage.paths]
+orpheus_cpp = ["src/orpheus_cpp", "*/orpheus-cpp/src/orpheus_cpp"]
+tests = ["tests", "*/orpheus-cpp/tests"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "no cov",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+]
